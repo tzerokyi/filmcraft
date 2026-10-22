@@ -615,6 +615,26 @@ mod tests {
     }
 
     /// Explicit project font selection must not be overridden by fallback.
+    /// The same fallback is shared by caption, title and graphic text. Verify
+    /// script coverage rather than assuming a particular font is installed on CI.
+    #[test]
+    fn multilingual_glyphs_use_system_or_embedded_fallback() {
+        scan_system();
+        let primary = resolve("Inter", "Regular").face;
+        for ch in ['한', 'あ', '界', 'م', 'א', 'क', 'ก'] {
+            let offered = all_faces().iter().any(|f| {
+                f.info.origin != "bundled" && f.covers_text(&ch.to_string())
+            });
+            if !offered {
+                continue;
+            }
+            let selected = fallback_for(ch, primary);
+            assert!(face(selected).has_char(ch), "missing fallback for {ch}");
+            // Repeat calls must preserve the same result through the glyph cache.
+            assert_eq!(fallback_for(ch, primary), selected);
+        }
+    }
+
     #[test]
     fn explicit_font_has_priority_over_fallback() {
         let inter = resolve("Inter", "Regular").face;
