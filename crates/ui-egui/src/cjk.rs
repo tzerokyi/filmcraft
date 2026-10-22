@@ -26,7 +26,10 @@ pub(crate) fn craft_fonts() -> impl Iterator<Item = &'static filmcraft_text::fon
 // Hangul: neither the UI fonts nor the Chinese/Japanese fallbacks have it, so typed, pasted and
 // IME-composed Korean drew as missing-glyph boxes (artcraft#2093).
 const KOREAN_SAMPLE: &str = "한국어입력테스트";
-const KOREAN_PREFERRED: &[&str] = &["Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "Source Han Sans K", "NanumGothic"];
+const KOREAN_PREFERRED: &[&str] = &[
+    "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "NanumGothic",
+    "Nanum Gothic", "Noto Sans CJK KR", "Source Han Sans K",
+];
 
 fn system_font() -> Option<Arc<FontData>> {
     static FONT: OnceLock<Option<Arc<FontData>>> = OnceLock::new();
@@ -65,17 +68,18 @@ pub(crate) fn available() -> bool {
     craft_fonts().next().is_some() || system_font().is_some()
 }
 
-/// Append Chinese faces after the Latin UI fonts and the Japanese fallbacks. This keeps the
-/// interface's Latin typography and Japanese glyph forms, and covers the simplified and
-/// traditional hanzi in media and track names that Japanese fonts lack.
+/// Append Hangul before Chinese/pan-CJK faces (but after Japanese UI faces installed
+/// by the theme). Otherwise a pan-CJK font that happens to include Hangul can shadow
+/// the platform's Korean font. This applies regardless of the interface language:
+/// imported Korean filenames and caption labels must work in the English UI too.
 pub(crate) fn install(fonts: &mut FontDefinitions) {
-    install_chinese(fonts);
     if let Some(font) = korean_font() {
         fonts.font_data.insert("system-korean".into(), font);
         for stack in fonts.families.values_mut() {
             stack.push("system-korean".into());
         }
     }
+    install_chinese(fonts);
 }
 
 fn install_chinese(fonts: &mut FontDefinitions) {
