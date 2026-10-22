@@ -104,3 +104,29 @@ fn install_chinese(fonts: &mut FontDefinitions) {
         stack.extend(order.iter().map(|f| name(f)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn korean_font_precedes_pan_cjk_in_ui_stacks() {
+        if !korean_available() {
+            eprintln!("SKIPPED: no installed Korean UI font");
+            return;
+        }
+        let mut fonts = FontDefinitions::default();
+        install(&mut fonts);
+        for (family, stack) in &fonts.families {
+            let korean = stack.iter().position(|name| name == "system-korean");
+            let Some(korean) = korean else {
+                panic!("Korean font missing from {family:?}");
+            };
+            for (index, name) in stack.iter().enumerate() {
+                if name == "system-chinese" || name.starts_with("craft:") {
+                    assert!(korean < index, "Korean fallback behind {name} in {family:?}");
+                }
+            }
+        }
+    }
+}
