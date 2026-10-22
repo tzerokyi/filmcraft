@@ -459,40 +459,167 @@ fn is_serif(family: &str) -> bool {
     (f.contains("serif") && !f.contains("sans")) || f.contains("mincho")
 }
 
-/// A face that covers `c`, preferring `prefer`; bundled, craft-fonts and already-registered faces
-/// are searched, in that order.
+/// Native font family preferences by Unicode script. These are hints, not a fixed font list:
+/// any installed font can serve a glyph if none of the preferred families has it.
+/// Explicitly selected project fonts always take precedence when they cover a character.
+fn preferred_system_families(c: char) -> &'static [&'static str] {
+    match c as u32 {
+        // Hangul Jamo, compatibility Jamo, syllables and extended Jamo.
+        0x1100..=0x11ff | 0x3130..=0x318f | 0xa960..=0xa97f | 0xac00..=0xd7af | 0xd7b0..=0xd7ff | 0xffa0..=0xffdc => &[
+            "Noto Sans KR", "Noto Sans CJK KR", "Noto Serif KR", "Noto Serif CJK KR",
+            "NanumGothic", "Nanum Gothic", "NanumMyeongjo", "Malgun Gothic",
+            "Apple SD Gothic Neo", "Source Han Sans K", "Source Han Serif K",
+            "UnDotum", "Baekmuk Gulim",
+        ],
+        // Hiragana and Katakana.
+        0x3040..=0x30ff | 0x31f0..=0x31ff => &[
+            "Noto Sans JP", "Noto Sans CJK JP", "Noto Serif JP", "Noto Serif CJK JP",
+            "Yu Gothic", "Hiragino Sans", "Meiryo", "BIZ UDPGothic",
+        ],
+        // Arabic (including supplementary Arabic blocks).
+        0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff | 0xfb50..=0xfdff | 0xfe70..=0xfeff => &[
+            "Noto Naskh Arabic", "Noto Sans Arabic", "Amiri", "Geeza Pro", "Arial",
+        ],
+        0x0590..=0x05ff | 0xfb1d..=0xfb4f => &["Noto Sans Hebrew", "Noto Serif Hebrew", "Arial Hebrew", "David", "Arial"],
+        0x0900..=0x097f | 0xa8e0..=0xa8ff => &["Noto Sans Devanagari", "Noto Serif Devanagari", "Mangal", "Kohinoor Devanagari"],
+        0x0e00..=0x0e7f => &["Noto Sans Thai", "Noto Serif Thai", "Leelawadee UI", "Thonburi"],
+        // Han ideographs have shared code points across locales. A manually chosen
+        // project font wins above; absent that, the existing craft Japanese priority
+        // is retained for compatibility with Japanese title projects.
+        0x3400..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f => &[
+            "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
+            "Noto Sans CJK TC", "Noto Sans CJK JP", "Microsoft YaHei",
+            "PingFang SC", "Hiragino Sans",
+        ],
+        _ => &[],
+    }
+}
+
+fn is_hangul(c: char) -> bool {
+    matches!(c as u32, 0x1100..=0x11ff | 0x3130..=0x318f | 0xa960..=0xa97f | 0xac00..=0xd7af | 0xd7b0..=0xd7ff | 0xffa0..=0xffdc)
+}
+
+/// Find a native face without keeping the bytes of every probed system font in RAM.
+/// We rank names/weights first, then probe cmap on demand; only the chosen face is
+/// loaded into the text renderer. The database's system scan reads name tables only.
+fn native_fallback(c: char, primary: &Face) -> Option<FaceId> {
+    if cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    scan_system();
+    let preferred = preferred_system_families(c);
+    let serif = is_serif(&primary.info.family);
+    let mut candidates: Vec<_> = all_faces().into_iter().filter(|f| f.info.origin == "system").collect();
+    candidates.sort_by_key(|f| {
+        let rank = preferred.iter().position(|name| f.info.family.eq_ignore_ascii_case(name)).unwrap_or(usize::MAX);
+        (
+            rank,
+            is_serif(&f.info.family) != serif,
+            f.info.italic != primary.info.italic,
+            f.info.weight.abs_diff(primary.info.weight),
+        )
+    });
+    let glyph = c.to_string();
+    candidates.into_iter().find(|f| f.covers_text(&glyph)).map(|f| f.id)
+}
+
+/// A face that covers `c`. The requested font always wins. For characters absent
+/// from it, prefer script-appropriate embedded/system faces (Korean for Hangul),
+/// then any font that contains the glyph. Cache results per glyph and primary face
+/// to avoid re-scanning font files for every frame of a caption.
+/// A new registered font invalidates cached decisions through the face count.
 pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
-    let p = face(prefer);
-    if p.has_char(c) || c.is_control() {
+    let primary = face(prefer);
+    if primary.has_char(c) || c.is_control() {
         return prefer;
     }
+    // Native fonts are essential for Hangul on builds without a Korean craft face.
+    // Scan before inspecting the cache so the first caption can use them immediately.
+    let hangul = is_hangul(c);
+    if hangul && !system_scanned() {
+        scan_system();
+    }
+    type Cache = std::collections::HashMap<(char, FaceId), (usize, FaceId)>;
+    static CACHE: OnceLock<std::sync::Mutex<Cache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
     let faces = all_faces();
-    // prefer a face of the same italic-ness that is bundled (cheap), then anything loaded already
-    for f in faces.iter().filter(|f| f.info.origin == "bundled") {
-        if f.has_char(c) {
-            return f.id;
-        }
+    let version = faces.len();
+    if let Some(&(saved_version, id)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&(c, prefer))
+        && saved_version == version
+    {
+        return id;
     }
-    // then the craft-fonts faces (Japanese): Mincho for serif text, Gothic otherwise, nearest weight
-    let serif = is_serif(&p.info.family);
-    let mut craft: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.origin == CRAFT_ORIGIN).collect();
-    craft.sort_by_key(|f| (is_serif(&f.info.family) != serif, f.info.italic != p.info.italic, f.info.weight.abs_diff(p.info.weight)));
-    for f in craft {
-        if f.has_char(c) {
-            return f.id;
-        }
+
+    let serif = is_serif(&primary.info.family);
+    let choose_craft = |korean_only: bool| {
+        let mut craft: Vec<_> = faces.iter().filter(|f| {
+            f.info.origin == CRAFT_ORIGIN
+                && (!korean_only || CRAFT_FONTS.iter().any(|entry| {
+                    entry.scripts.contains(&"Kore") && entry.family.eq_ignore_ascii_case(&f.info.family)
+                }))
+        }).collect();
+        craft.sort_by_key(|f| (is_serif(&f.info.family) != serif, f.info.italic != primary.info.italic, f.info.weight.abs_diff(primary.info.weight)));
+        craft.into_iter().find(|f| f.has_char(c)).map(|f| f.id)
+    };
+
+    let result = if hangul {
+        // Do not let a pan-CJK Japanese/Chinese face shadow a Korean UI font.
+        choose_craft(true)
+            .or_else(|| native_fallback(c, &primary))
+            .or_else(|| choose_craft(false))
+    } else {
+        faces.iter().find(|f| f.info.origin == "bundled" && f.has_char(c)).map(|f| f.id)
+            .or_else(|| choose_craft(false))
+            .or_else(|| faces.iter().find(|f| f.info.origin != "bundled" && f.info.origin != "system" && f.info.origin != CRAFT_ORIGIN && f.has_char(c)).map(|f| f.id))
+            .or_else(|| native_fallback(c, &primary))
+    }.unwrap_or(prefer);
+
+    // The native scan might have registered faces since 'version' was captured.
+    // Store the final count, and invalidate after any later add_source/add_font_data.
+    let final_version = all_faces().len();
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.len() > 8192 {
+        guard.clear();
     }
-    for f in faces.iter().filter(|f| f.info.origin != "bundled" && f.bytes.get().is_some()) {
-        if f.has_char(c) {
-            return f.id;
-        }
-    }
-    prefer
+    guard.insert((c, prefer), (final_version, result));
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captions/titles must find installed Hangul glyphs even if Inter lacks them.
+    /// This test runs without craft-fonts and skips only when no Korean glyphs
+    /// exist on the runner (e.g. a minimal Linux CI image).
+    #[test]
+    fn korean_caption_uses_installed_font() {
+        scan_system();
+        let text = "한글 자막 테스트";
+        let glyphs: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let installed = all_faces().iter().any(|f| f.info.origin == "system" && glyphs.iter().all(|c| f.covers_text(&c.to_string())));
+        let embedded = CRAFT_FONTS.iter().any(|f| glyphs.iter().all(|c| {
+            read_faces_bytes(f.bytes).iter().any(|n| n.family == f.family && resolve(&n.family, &n.style).face != usize::MAX)
+        }));
+        if !installed && !embedded {
+            eprintln!("SKIPPED: no installed Korean font or craft-fonts");
+            return;
+        }
+        let default_face = resolve("Inter", "Regular").face;
+        for c in glyphs {
+            let id = fallback_for(c, default_face);
+            assert!(face(id).has_char(c), "missing Korean glyph: {c}");
+        }
+        let layout = crate::layout(text, &crate::TextStyle { size: 42.0, ..Default::default() }, &Default::default());
+        assert!(layout.glyphs.iter().all(|g| g.id != 0), "Korean caption rendered .notdef");
+    }
+
+    /// Explicit project font selection must not be overridden by fallback.
+    #[test]
+    fn explicit_font_has_priority_over_fallback() {
+        let inter = resolve("Inter", "Regular").face;
+        assert_eq!(fallback_for('A', inter), inter);
+    }
 
     #[test]
     fn bundled_families_and_resolution() {
