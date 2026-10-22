@@ -619,7 +619,6 @@ mod tests {
         assert!(layout.glyphs.iter().all(|g| g.id != 0), "Korean caption rendered .notdef");
     }
 
-    /// Explicit project font selection must not be overridden by fallback.
     /// The same fallback is shared by caption, title and graphic text. Verify
     /// script coverage rather than assuming a particular font is installed on CI.
     #[test]
@@ -640,6 +639,7 @@ mod tests {
         }
     }
 
+    /// Explicit project font selection must not be overridden by fallback.
     #[test]
     fn explicit_font_has_priority_over_fallback() {
         let inter = resolve("Inter", "Regular").face;
