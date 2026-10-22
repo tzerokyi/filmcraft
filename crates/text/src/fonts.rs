@@ -520,7 +520,12 @@ fn native_fallback(c: char, primary: &Face) -> Option<FaceId> {
         )
     });
     let glyph = c.to_string();
-    candidates.into_iter().find(|f| f.covers_text(&glyph)).map(|f| f.id)
+    candidates.into_iter().find(|f| f.covers_text(&glyph)).map(|f| {
+        // Keep only the selected font's bytes. Otherwise the next character in
+        // the same caption would re-read the same large font from disk.
+        let _ = f.has_char(c);
+        f.id
+    })
 }
 
 /// A face that covers `c`. The requested font always wins. For characters absent
@@ -598,7 +603,7 @@ mod tests {
         let text = "한글 자막 테스트";
         let glyphs: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
         let available = all_faces().iter().any(|f| {
-            matches!(f.info.origin, "system" | CRAFT_ORIGIN)
+            (f.info.origin == "system" || f.info.origin == CRAFT_ORIGIN)
                 && glyphs.iter().all(|c| f.covers_text(&c.to_string()))
         });
         if !available {
