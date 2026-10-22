@@ -597,11 +597,11 @@ mod tests {
         scan_system();
         let text = "한글 자막 테스트";
         let glyphs: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
-        let installed = all_faces().iter().any(|f| f.info.origin == "system" && glyphs.iter().all(|c| f.covers_text(&c.to_string())));
-        let embedded = CRAFT_FONTS.iter().any(|f| glyphs.iter().all(|c| {
-            read_faces_bytes(f.bytes).iter().any(|n| n.family == f.family && resolve(&n.family, &n.style).face != usize::MAX)
-        }));
-        if !installed && !embedded {
+        let available = all_faces().iter().any(|f| {
+            matches!(f.info.origin, "system" | CRAFT_ORIGIN)
+                && glyphs.iter().all(|c| f.covers_text(&c.to_string()))
+        });
+        if !available {
             eprintln!("SKIPPED: no installed Korean font or craft-fonts");
             return;
         }
